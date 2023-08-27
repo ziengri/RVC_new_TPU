@@ -1,6 +1,9 @@
 import torch, numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_xla.core.xla_model as xm
+import torch_xla.distributed.xla_multiprocessing as xmp
+
 
 
 class BiGRU(nn.Module):
@@ -13,7 +16,6 @@ class BiGRU(nn.Module):
             batch_first=True,
             bidirectional=True,
         )
-
     def forward(self, x):
         return self.gru(x)[0]
 
@@ -326,21 +328,26 @@ class MelSpectrogram(torch.nn.Module):
         return log_mel_spec
 
 
+
+
 class RMVPE:
     def __init__(self, model_path, is_half, device=None):
         self.resample_kernel = {}
         model = E2E(4, 1, (2, 2))
-        ckpt = torch.load(model_path, map_location="cpu")
+        # ckpt = torch.load(model_path, map_location="cpu")
+        device = xm.xla_device()
+        ckpt = xm.load(model_path, map_location=device)
         model.load_state_dict(ckpt)
         model.eval()
         if is_half == True:
             model = model.half()
-        self.model = model
+        # self.model = model
+        self.model = xm.parallel(model, device)
         self.resample_kernel = {}
         self.is_half = is_half
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = device
+        # if device is None:
+        #     device = "cuda" if torch.cuda.is_available() else "cpu"
+        # self.device = device
         self.mel_extractor = MelSpectrogram(
             is_half, 128, 16000, 1024, 160, None, 30, 8000
         ).to(device)
@@ -354,40 +361,38 @@ class RMVPE:
             mel = F.pad(
                 mel, (0, 32 * ((n_frames - 1) // 32 + 1) - n_frames), mode="reflect"
             )
-            hidden = self.model(mel)
+            hidden = xm.forward(self.model, mel)
             return hidden[:, :n_frames]
 
     def decode(self, hidden, thred=0.03):
         cents_pred = self.to_local_average_cents(hidden, thred=thred)
         f0 = 10 * (2 ** (cents_pred / 1200))
         f0[f0 == 10] = 0
-        # f0 = np.array([10 * (2 ** (cent_pred / 1200)) if cent_pred else 0 for cent_pred in cents_pred])
+
         return f0
 
     def infer_from_audio(self, audio, thred=0.03):
         audio = torch.from_numpy(audio).float().to(self.device).unsqueeze(0)
-        # torch.cuda.synchronize()
-        # t0=ttime()
+
+
         mel = self.mel_extractor(audio, center=True)
-        # torch.cuda.synchronize()
-        # t1=ttime()
+
+
         hidden = self.mel2hidden(mel)
-        # torch.cuda.synchronize()
-        # t2=ttime()
+
+
         hidden = hidden.squeeze(0).cpu().numpy()
         if self.is_half == True:
             hidden = hidden.astype("float32")
         f0 = self.decode(hidden, thred=thred)
-        # torch.cuda.synchronize()
-        # t3=ttime()
-        # print("hmvpe:%s\t%s\t%s\t%s"%(t1-t0,t2-t1,t3-t2,t3-t0))
+
         return f0
 
     def to_local_average_cents(self, salience, thred=0.05):
         # t0 = ttime()
         center = np.argmax(salience, axis=1)  # 帧长#index
         salience = np.pad(salience, ((0, 0), (4, 4)))  # 帧长,368
-        # t1 = ttime()
+
         center += 4
         todo_salience = []
         todo_cents_mapping = []
@@ -396,17 +401,13 @@ class RMVPE:
         for idx in range(salience.shape[0]):
             todo_salience.append(salience[:, starts[idx] : ends[idx]][idx])
             todo_cents_mapping.append(self.cents_mapping[starts[idx] : ends[idx]])
-        # t2 = ttime()
         todo_salience = np.array(todo_salience)  # 帧长，9
         todo_cents_mapping = np.array(todo_cents_mapping)  # 帧长，9
         product_sum = np.sum(todo_salience * todo_cents_mapping, 1)
         weight_sum = np.sum(todo_salience, 1)  # 帧长
         devided = product_sum / weight_sum  # 帧长
-        # t3 = ttime()
         maxx = np.max(salience, axis=1)  # 帧长
         devided[maxx <= thred] = 0
-        # t4 = ttime()
-        # print("decode:%s\t%s\t%s\t%s" % (t1 - t0, t2 - t1, t3 - t2, t4 - t3))
         return devided
 
 

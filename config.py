@@ -24,8 +24,8 @@ def use_fp32_config():
 
 class Config:
     def __init__(self):
-        self.device = "cuda:0"
-        self.is_half = True
+        self.device = xm.xla_device()
+        self.is_half = False
         self.n_cpu = 0
         self.gpu_name = None
         self.gpu_mem = None
@@ -78,43 +78,31 @@ class Config:
             return False
 
     def device_config(self) -> tuple:
-        if torch.cuda.is_available():
-            i_device = int(self.device.split(":")[-1])
-            self.gpu_name = torch.cuda.get_device_name(i_device)
-            if (
-                ("16" in self.gpu_name and "V100" not in self.gpu_name.upper())
-                or "P40" in self.gpu_name.upper()
-                or "1060" in self.gpu_name
-                or "1070" in self.gpu_name
-                or "1080" in self.gpu_name
-            ):
-                print("Found GPU", self.gpu_name, ", force to fp32")
-                self.is_half = False
-                use_fp32_config()
-            else:
-                print("Found GPU", self.gpu_name)
-            self.gpu_mem = int(
-                torch.cuda.get_device_properties(i_device).total_memory
-                / 1024
-                / 1024
-                / 1024
-                + 0.4
-            )
-            if self.gpu_mem <= 4:
-                with open("trainset_preprocess_pipeline_print.py", "r") as f:
-                    strr = f.read().replace("3.7", "3.0")
-                with open("trainset_preprocess_pipeline_print.py", "w") as f:
-                    f.write(strr)
-        elif self.has_mps():
-            print("No supported Nvidia GPU found, use MPS instead")
-            self.device = "mps"
+        i_device = int(self.device.split(":")[-1])
+        self.gpu_name = torch.cuda.get_device_name(i_device)
+        if (
+            ("16" in self.gpu_name and "V100" not in self.gpu_name.upper())
+            or "P40" in self.gpu_name.upper()
+            or "1060" in self.gpu_name
+            or "1070" in self.gpu_name
+            or "1080" in self.gpu_name
+        ):
+            print("Found GPU", self.gpu_name, ", force to fp32")
             self.is_half = False
-            use_fp32_config()
         else:
-            print("No supported Nvidia GPU found, use CPU instead")
-            self.device = "cpu"
-            self.is_half = False
-            use_fp32_config()
+            print("Found GPU", self.gpu_name)
+        self.gpu_mem = int(
+            torch.cuda.get_device_properties(i_device).total_memory
+            / 1024
+            / 1024
+            / 1024
+            + 0.4
+        )
+        if self.gpu_mem <= 4:
+            with open("trainset_preprocess_pipeline_print.py", "r") as f:
+                strr = f.read().replace("3.7", "3.0")
+            with open("trainset_preprocess_pipeline_print.py", "w") as f:
+                f.write(strr)
 
         if self.n_cpu == 0:
             self.n_cpu = cpu_count()
